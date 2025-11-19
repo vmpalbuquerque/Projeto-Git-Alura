@@ -1,147 +1,279 @@
 import os
 from datetime import datetime
 from docx import Document
-from docx.shared import Inches
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from PIL import Image
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from docx.enum.section import WD_ORIENT, WD_SECTION
 
-# --- FUNÇÕES DE LÓGICA DO DOCUMENTO ---
+# --- CONFIGURAÇÕES GLOBAIS E PORTABILIDADE ---
 
-def criar_documento_evidencia(caminhos_imagens, cenario_texto, titulo_documento="Relatorio_Evidencia"):
+# Tenta definir o diretório base para garantir a portabilidade do caminho da logo
+try:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    BASE_DIR = os.getcwd() # Fallback
+
+# Caminho para a logo (AGORA RELATIVO, deve estar na mesma pasta do script)
+LOGO_PATH = os.path.join(BASE_DIR, "logo_porto_2.png")
+
+# Cor azul do cabeçalho (sem #)
+HEADER_BLUE = "009CDE"
+# Cor branca para o texto do cabeçalho
+HEADER_TEXT_COLOR = RGBColor(255, 255, 255) 
+# Cor preta para o corpo do documento
+BODY_TEXT_COLOR = RGBColor(0, 0, 0) 
+
+# ---------------- utilidades OXML ----------------
+def set_cell_background(cell, fill):
     """
-    Cria um documento Word (.docx) com o cenário e UMA LISTA de imagens.
+    Define o preenchimento de cor de fundo de uma célula (hex sem '#') usando OXML.
     """
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), fill)
+    tcPr.append(shd)
+
+# ---------------- formatação global ----------------
+def aplicar_formato_run(run, tamanho_pt=None, cor=BODY_TEXT_COLOR):
+    """Aplica Calibri, negrito, cor e tamanho opcional a um run."""
+    run.font.name = "Calibri"
+    run.bold = True
+    run.font.color.rgb = cor # Usa a cor passada (padrão é preta)
+    if tamanho_pt:
+        run.font.size = Pt(tamanho_pt)
+
+def aplicar_formato_paragrafo(p, tamanho_pt=None, cor=BODY_TEXT_COLOR):
+    """Aplica o formato padrão a todos os runs de um parágrafo recém-criado."""
+    # Se parágrafo não tiver runs (correção), cria um run vazio
+    if not p.runs:
+        r = p.add_run()
+        aplicar_formato_run(r, tamanho_pt, cor)
+    else:
+        for run in p.runs:
+            aplicar_formato_run(run, tamanho_pt, cor)
+
+def padronizar_documento(documento):
+    """Garante que toda run no documento esteja em Calibri, negrito e preta (inclui tabelas)."""
+    for par in documento.paragraphs:
+        for run in par.runs:
+            if run.font.color.rgb != HEADER_TEXT_COLOR:
+                 aplicar_formato_run(run)
+    for tbl in documento.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                for par in cell.paragraphs:
+                    for run in par.runs:
+                        if run.font.color.rgb != HEADER_TEXT_COLOR:
+                             aplicar_formato_run(run)
+
+# ---------------- helpers de imagem ----------------
+def file_timestamp(path):
+    # Função mantida, mas não utilizada no documento final, apenas se precisar de debug
+    try:
+        ts = os.path.getmtime(path)
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        return ""
+
+def inserir_imagem_com_titulo(documento, caminho_imagem, largura_inch=6.0):
+    """
+    Insere imagem SEM legenda no documento.
+    Ajusta largura para Inches(largura_inch).
+    """
+    nome = os.path.basename(caminho_imagem)
     
-    # Formata a data e hora para o nome do documento
+    # ❌ CÓDIGO DE LEGENDA REMOVIDO AQUI:
+    # par_legend = documento.add_paragraph() 
+    # run = par_legend.add_run(f"Print: {nome}  (capturado em {file_timestamp(caminho_imagem)})")
+    # aplicar_formato_run(run, tamanho_pt=9)
+    # par_legend.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+    
+    # Inserir imagem redimensionada para a largura em polegadas
+    try:
+        documento.add_picture(caminho_imagem, width=Inches(largura_inch))
+    except Exception as e:
+        p_err = documento.add_paragraph(f"[ERRO AO INSERIR IMAGEM: {nome}] - {e}")
+        aplicar_formato_paragrafo(p_err, tamanho_pt=9, cor=RGBColor(255, 0, 0)) # Erro em vermelho
+
+# ---------------- função principal de criação ----------------
+def criar_documento_porto(caminhos_imagens, cenario_texto, titulo_documento="Relatorio_Evidencias_Porto"):
+    """
+    Cria o documento com layout Porto Seguro e salva .docx
+    """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     nome_documento = f"{titulo_documento}_{timestamp}.docx"
+    doc = Document()
+    # Define as margens do documento
+    section = doc.sections[0]
     
-    try:
-        # Inicia o Documento
-        documento = Document()
-        
-        # Adiciona o Título Principal
-        documento.add_heading('Evidências de Testes', 0)
-        
-        # Adiciona a Data e Hora da Geração
-        documento.add_paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-        documento.add_paragraph("---")
-        
-        # Adiciona o Cenário (Texto)
-        documento.add_heading('Cenário de Teste / Descrição:', level=1)
-        documento.add_paragraph(cenario_texto)
-        
-        # Adiciona a Imagem (Loop para múltiplas imagens)
-        documento.add_heading('Evidências (Capturas de Tela):', level=1)
+    # Margem Esquerda: 0.5 polegadas (para empurrar o conteúdo para a esquerda)
+    section.left_margin = Inches(0.5) 
+    
+    # Você pode ajustar as outras se necessário:
+    section.right_margin = Inches(0.75) 
+    section.top_margin = Inches(0.75)
+    section.bottom_margin = Inches(0.75)
 
-        if not caminhos_imagens:
-            documento.add_paragraph("Nenhuma imagem anexada.")
-        else:
-            for i, caminho in enumerate(caminhos_imagens):
-                documento.add_heading(f'Evidência {i+1}: {os.path.basename(caminho)}', level=2)
-                
-                # Adiciona a imagem, definindo a largura para 6 polegadas (tamanho padrão ideal)
-                documento.add_picture(caminho, width=Inches(6))
-                
-        # Salva o Documento
-        documento.save(nome_documento)
-        
-        return f"\n🎉 Documento de evidências criado com sucesso em: {os.path.abspath(nome_documento)}\nImagens anexadas: {len(caminhos_imagens)}"
-        
-    except FileNotFoundError:
-        return f"❌ ERRO: Uma das imagens não foi encontrada."
-    except Exception as e:
-        return f"❌ Erro ao criar o documento: {e}"
+    # --- Cabeçalho estilizado com tabela 1x2 (texto à esquerda, logo à direita) ---
+    tabela = doc.add_table(rows=1, cols=2)
+    tabela.autofit = True
+    a_cel_titulo = tabela.columns[0]
+    a_cel_logo = tabela.columns[1]
+    a_cel_titulo.width = Inches(5)
+    a_cel_logo.width = Inches(2)
+
+    cel_titulo = tabela.rows[0].cells[0]
+    cel_logo = tabela.rows[0].cells[1]
+
+    # Pinta fundo das células com azul (ambas para parecer faixa)
+    set_cell_background(cel_titulo, HEADER_BLUE)
+    set_cell_background(cel_logo, HEADER_BLUE)
+
+    # Título grande à esquerda
+    p_t = cel_titulo.paragraphs[0]
+    p_t.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+    run_t = p_t.add_run("EVIDÊNCIAS DE TESTES")
+    
+    # Define a cor do texto do cabeçalho como BRANCA para contraste!
+    aplicar_formato_run(run_t, tamanho_pt=20, cor=HEADER_TEXT_COLOR) 
+    
+    p_t.space_after = Pt(6)
+
+    # Logo à direita
+    if os.path.exists(LOGO_PATH):
+        p_logo = cel_logo.paragraphs[0]
+        p_logo.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
+        try:
+            p_logo.add_run().add_picture(LOGO_PATH, width=Inches(1.5))
+        except Exception as e:
+            p_logo.add_run("LOGO").bold = True
+    else:
+        # Se não existir logo, escreve aviso
+        p_logo = cel_logo.paragraphs[0]
+        p_logo.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
+        run_missing = p_logo.add_run("LOGO NÃO ENCONTRADA")
+        aplicar_formato_run(run_missing, tamanho_pt=10, cor=HEADER_TEXT_COLOR) # Cor branca para contraste
+
+    # Espaço após cabeçalho
+    doc.add_paragraph("")
 
 
-# --- FUNÇÃO DA INTERFACE GRÁFICA (GUI) ---
+    # --- Seção: Cenário de Teste / Descrição ---
+    h1 = doc.add_paragraph()
+    run_h1 = h1.add_run("Cenário de Teste / Descrição:")
+    aplicar_formato_run(run_h1, tamanho_pt=14)
+    h1.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
 
-class RoboEvidenciasApp:
+    doc.add_paragraph("")  # pequena quebra
+
+    p_cenario = doc.add_paragraph()
+    run_cenario = p_cenario.add_run(cenario_texto)
+    aplicar_formato_run(run_cenario, tamanho_pt=11)
+    p_cenario.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+
+    doc.add_paragraph("")
+
+    # --- Seção: Evidências ---
+    h2 = doc.add_paragraph()
+    run_h2 = h2.add_run("Evidências:")
+    aplicar_formato_run(run_h2, tamanho_pt=14)
+
+    doc.add_paragraph("")
+
+    if not caminhos_imagens:
+        p_empty = doc.add_paragraph()
+        run_empty = p_empty.add_run("Nenhuma imagem anexada.")
+        aplicar_formato_run(run_empty, tamanho_pt=11)
+    else:
+        for i, caminho in enumerate(caminhos_imagens):
+            # Subtítulo para cada evidência
+            p_ev = doc.add_paragraph()
+            # ❌ ALTERAÇÃO AQUI: Removido o os.path.basename(caminho) para não mostrar o nome do arquivo.
+            run_ev = p_ev.add_run(f"Evidência {i+1}")
+            aplicar_formato_run(run_ev, tamanho_pt=12)
+
+            doc.add_paragraph("")  # pular linha
+
+            inserir_imagem_com_titulo(doc, caminho, largura_inch=6.0)
+
+            doc.add_paragraph("")
+
+    # Salva documento
+    doc.save(nome_documento)
+    return os.path.abspath(nome_documento)
+
+# ---------------- GUI simples ----------------
+class AppGUI:
     def __init__(self, master):
         self.master = master
-        master.title("🤖 Robô Gerador de Evidências")
-        
-        # Variáveis de controle
-        self.caminhos_completos = []
-        self.imagens_selecionadas_display = tk.StringVar()
-        self.imagens_selecionadas_display.set("Nenhuma imagem selecionada")
-        
-        # 1. Entrada do Cenário
-        tk.Label(master, text="Descreva o Cenário de Teste:", font=('Arial', 10, 'bold')).pack(pady=(10, 0))
-        self.cenario_entry = tk.Text(master, height=5, width=50)
-        self.cenario_entry.pack(pady=5, padx=10)
+        master.title("Robô Evidências - Modelo Porto Seguro")
+        master.minsize(460, 380)
 
-        # 2. Seleção das Imagens
-        tk.Label(master, text="Imagens Selecionadas:", font=('Arial', 10, 'bold')).pack(pady=(10, 0))
-        
-        # Exibe o caminho da imagem selecionada
-        self.caminho_label = tk.Label(master, textvariable=self.imagens_selecionadas_display, width=50, bg='lightgray', anchor='w', wraplength=350)
-        self.caminho_label.pack(pady=5, padx=10)
-        
-        # Botão para abrir o explorador de arquivos (Modificado para múltiplas seleções)
-        self.botao_selecionar = tk.Button(master, text="📂 Selecionar Imagens (Prints)", command=self.selecionar_imagens)
-        self.botao_selecionar.pack(pady=5)
-        
-        # 3. Botão de Execução
-        self.botao_gerar = tk.Button(master, text="🚀 GERAR DOCUMENTO WORD", command=self.gerar_documento, bg='green', fg='white', font=('Arial', 12, 'bold'))
-        self.botao_gerar.pack(pady=20)
-        
-        # 4. Status
-        self.status_label = tk.Label(master, text="", fg='blue')
-        self.status_label.pack(pady=(5, 10))
+        tk.Label(master, text="Cenário de Teste (cole o texto abaixo):", font=("Calibri", 11, "bold")).pack(pady=(8,0))
+        self.texto = tk.Text(master, height=6, width=70, font=("Calibri", 11))
+        self.texto.pack(padx=10, pady=6)
+
+        tk.Label(master, text="Imagens selecionadas:", font=("Calibri", 11, "bold")).pack(pady=(6,0))
+        self.var_display = tk.StringVar(value="Nenhuma imagem selecionada")
+        self.label_display = tk.Label(master, textvariable=self.var_display, bg="lightgray", width=60, anchor="w", wraplength=420, font=("Calibri", 10))
+        self.label_display.pack(padx=10, pady=6)
+
+        btn_frame = tk.Frame(master)
+        btn_frame.pack(pady=6)
+
+        tk.Button(btn_frame, text="Selecionar Imagens", command=self.selecionar_imagens, font=("Calibri", 11, "bold")).grid(row=0, column=0, padx=6)
+        tk.Button(btn_frame, text="Gerar Documento (DOCX)", command=self.gerar, bg="green", fg="white", font=("Calibri", 11, "bold")).grid(row=0, column=1, padx=6)
+
+        self.status = tk.Label(master, text="", font=("Calibri", 10, "bold"))
+        self.status.pack(pady=(8,6))
+
+        self.caminhos = []
 
     def selecionar_imagens(self):
-        """Abre a janela de diálogo para escolher MÚLTIPLOS arquivos de imagem."""
+        initial_dir = BASE_DIR if os.path.exists(BASE_DIR) else os.getcwd()
         
-        # askopenfilenames permite a seleção de múltiplos arquivos
-        caminhos = filedialog.askopenfilenames(
-            initialdir=os.getcwd(), 
-            title="Selecione as Imagens de Evidência (Pode selecionar várias)",
-            filetypes=(("Arquivos PNG", "*.png"), ("Arquivos JPEG", "*.jpg"), ("Todos os arquivos", "*.*"))
-        )
-        
-        if caminhos:
-            self.caminhos_completos = list(caminhos)
-            count = len(self.caminhos_completos)
-            self.imagens_selecionadas_display.set(f"{count} imagem(ns) selecionada(s).")
-            self.status_label.config(text=f"✅ {count} imagem(ns) pronta(s) para o documento.", fg='blue')
+        arquivos = filedialog.askopenfilenames(title="Selecione imagens de evidência",
+                                               filetypes=[("Imagens", "*.png *.jpg *.jpeg"), ("Todos os arquivos", "*.*")],
+                                               initialdir=initial_dir)
+        if arquivos:
+            self.caminhos = list(arquivos)
+            self.var_display.set(f"{len(self.caminhos)} imagem(ns) selecionada(s).")
+            self.status.config(text="Imagens carregadas.", fg="black")
         else:
-            self.caminhos_completos = []
-            self.imagens_selecionadas_display.set("Nenhuma imagem selecionada")
-            self.status_label.config(text="Selecione as imagens.", fg='gray')
+            self.caminhos = []
+            self.var_display.set("Nenhuma imagem selecionada")
+            self.status.config(text="Nenhuma imagem selecionada.", fg="red")
 
-    def gerar_documento(self):
-        """Valida os dados e chama a função de criação do documento."""
-        
-        # '1.0' significa linha 1, caractere 0. tk.END é o fim do texto.
-        cenario = self.cenario_entry.get("1.0", tk.END).strip()
-        
-        if not cenario:
-            messagebox.showerror("Erro de Validação", "O campo 'Cenário de Teste' não pode estar vazio.")
+    def gerar(self):
+        texto = self.texto.get("1.0", tk.END).strip()
+        if not texto:
+            messagebox.showerror("Erro", "O campo do cenário não pode ficar vazio.")
+            return
+        if not self.caminhos:
+            messagebox.showerror("Erro", "Selecione ao menos uma imagem.")
             return
 
-        if not self.caminhos_completos:
-             messagebox.showerror("Erro de Validação", "Por favor, selecione pelo menos uma imagem de evidência.")
-             return
+        self.status.config(text="Gerando documento...", fg="orange")
+        self.master.update()
 
-        self.status_label.config(text="Criando documento... Aguarde.", fg='orange')
-        self.master.update() # Força a atualização da interface para exibir a mensagem
-        
-        # Chama a função de criação do documento, passando a LISTA de caminhos
-        resultado = criar_documento_evidencia(self.caminhos_completos, cenario)
-        
-        # Exibe o resultado na interface
-        if "ERRO" in resultado:
-            self.status_label.config(text=resultado, fg='red')
-            messagebox.showerror("Erro", resultado)
-        else:
-            self.status_label.config(text=resultado, fg='green')
-            messagebox.showinfo("Sucesso!", resultado)
+        try:
+            caminho_doc = criar_documento_porto(self.caminhos, texto)
+            self.status.config(text=f"Documento criado: {caminho_doc}", fg="green")
+            messagebox.showinfo("Sucesso", f"Documento criado:\n{caminho_doc}")
+        except Exception as e:
+            self.status.config(text=f"Erro: {e}", fg="red")
+            messagebox.showerror("Erro", str(e))
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    # Define um tamanho mínimo para a janela
-    root.minsize(400, 350) 
-    app = RoboEvidenciasApp(root)
+    app = AppGUI(root)
     root.mainloop()
